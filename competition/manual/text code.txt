@@ -1,0 +1,154 @@
+import cyberpi
+import mbot2
+import time
+
+EM_LEFT = "EM1"
+EM_RIGHT = "EM2"
+LAUNCHER_PORT = "DC1"
+GRIPPER_PORT = "S1"
+LIFT_PORT = "S2"
+
+DRIVE_MAX = 100
+TURN_MAX = 70
+SLOW_FACTOR = 0.4
+DEADBAND = 25
+AXIS_MAX = 255.0
+
+LAUNCHER_POWER = 100
+LAUNCHER_SPINUP = 0.6
+
+GRIPPER_OPEN = 20
+GRIPPER_SHUT = 110
+LIFT_DOWN = 0
+LIFT_UP = 90
+LIFT_STEP = 3
+
+LOOP_DELAY = 0.02
+
+def read_gamepad():
+    g = {}
+    g["lx"] = cyberpi.controller.get_joystick("lx")
+    g["ly"] = cyberpi.controller.get_joystick("ly")
+    g["ry"] = cyberpi.controller.get_joystick("ry")
+    g["fire"] = cyberpi.controller.is_press("r1")
+    g["grip"] = cyberpi.controller.is_press("l1")
+    g["lift_up"] = cyberpi.controller.is_press("1")
+    g["lift_dn"] = cyberpi.controller.is_press("2")
+    g["slow"] = cyberpi.controller.is_press("l2")
+    return g
+
+def axis(value):
+
+    if value is None:
+        return 0.0
+    if abs(value) < DEADBAND:
+        return 0.0
+    span = AXIS_MAX - DEADBAND
+    out = (abs(value) - DEADBAND) / span
+    if out > 1.0:
+        out = 1.0
+    if value < 0:
+        out = -out
+    return out
+
+def drive(forward, turn, slow):
+
+    scale = SLOW_FACTOR if slow else 1.0
+    left = (forward * DRIVE_MAX + turn * TURN_MAX) * scale
+    right = (forward * DRIVE_MAX - turn * TURN_MAX) * scale
+    left = clamp(left, -100, 100)
+    right = clamp(right, -100, 100)
+    mbot2.drive_power(left, right)
+
+def clamp(v, lo, hi):
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
+
+def stop_all():
+    mbot2.drive_power(0, 0)
+    mbot2.motor_set(0, LAUNCHER_PORT)
+
+class Launcher:
+
+    def __init__(self):
+        self.running = False
+        self.started_at = 0
+
+    def update(self, want_fire):
+        if want_fire and not self.running:
+            mbot2.motor_set(LAUNCHER_POWER, LAUNCHER_PORT)
+            self.running = True
+            self.started_at = time.time()
+        elif not want_fire and self.running:
+            mbot2.motor_set(0, LAUNCHER_PORT)
+            self.running = False
+
+    def ready(self):
+
+        return self.running and (time.time() - self.started_at) > LAUNCHER_SPINUP
+
+class Gripper:
+
+    def __init__(self):
+        self.shut = False
+        mbot2.servo_set(GRIPPER_OPEN, GRIPPER_PORT)
+
+    def update(self, want_shut):
+        if want_shut != self.shut:
+            mbot2.servo_set(GRIPPER_SHUT if want_shut else GRIPPER_OPEN, GRIPPER_PORT)
+            self.shut = want_shut
+
+class Lift:
+
+    def __init__(self):
+        self.angle = LIFT_DOWN
+        mbot2.servo_set(self.angle, LIFT_PORT)
+
+    def update(self, up, down):
+        target = self.angle
+        if up:
+            target = self.angle + LIFT_STEP
+        elif down:
+            target = self.angle - LIFT_STEP
+        target = clamp(target, LIFT_DOWN, LIFT_UP)
+        if target != self.angle:
+            self.angle = target
+            mbot2.servo_set(self.angle, LIFT_PORT)
+
+def main():
+    cyberpi.console.clear()
+    cyberpi.display.set_brush(0, 255, 0)
+    cyberpi.console.println("manual robot ready")
+    stop_all()
+
+    launcher = Launcher()
+    gripper = Gripper()
+    lift = Lift()
+    lost_frames = 0
+
+    while True:
+        try:
+            g = read_gamepad()
+            lost_frames = 0
+        except Exception:
+
+            lost_frames = lost_frames + 1
+            if lost_frames > 3:
+                stop_all()
+            time.sleep(LOOP_DELAY)
+            continue
+
+        forward = axis(g["ly"])
+        turn = axis(g["lx"])
+        drive(forward, turn, g["slow"])
+
+        launcher.update(g["fire"])
+        gripper.update(g["grip"])
+        lift.update(g["lift_up"], g["lift_dn"])
+
+        time.sleep(LOOP_DELAY)
+
+main()
