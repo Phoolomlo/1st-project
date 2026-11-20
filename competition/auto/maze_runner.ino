@@ -62,9 +62,6 @@ int   GUARD_SLOW = 0;
 
 int GAP_FWD_MS  = 180;
 int EXIT_FWD_MS = 300;
-
-float EXIT_DIST_CM = 10.0;
-int   EXIT_MAX_MS  = 1500;
 int TURN90_MS   = 200;
 
 #define ARC_TURNS
@@ -89,8 +86,8 @@ const float   TOO_CLOSE_CM = 2.5;
 const uint8_t NO_ECHO_CONFIRM = 4;
 const float   NEAR_HOLD_CM = 12.0;
 
-const float   STILL_CM       = 1.5;
-const uint8_t STUCK_COUNT    = 9;
+const float   STILL_CM       = 0.8;
+const uint8_t STUCK_COUNT    = 5;
 const int     UNJAM_PWM      = 160;
 const int     UNJAM_MS       = 200;
 const float   UNJAM_DIFF_CM  = 1.0;
@@ -112,8 +109,6 @@ uint8_t missF = 0, missL = 0, missR = 0;
 uint8_t openL = 0, openR = 0;
 unsigned long stuckSince = 0, lastShake = 0;
 uint8_t stillCount = 0;
-bool stuckFlag = false;
-float refF = -100, refL = -100, refR = -100;
 float stuckRef = -100;
 
 void checkSerialStop() {
@@ -220,17 +215,6 @@ uint8_t countOpen(uint8_t count, float raw) {
 bool sideOpenL() { return openL >= OPEN_CONFIRM; }
 bool sideOpenR() { return openR >= OPEN_CONFIRM; }
 
-void trackStuck() {
-  if (lastLeft == 0 && lastRight == 0) return;
-  float moved = fabs(dF - refF) + fabs(dL - refL) + fabs(dR - refR);
-  if (moved > STILL_CM) { refF = dF; refL = dL; refR = dR; stillCount = 0; }
-  else {
-    if (stillCount < 255) stillCount++;
-    if (stillCount >= STUCK_COUNT) stuckFlag = true;
-  }
-}
-bool stuckNow() { return stuckFlag; }
-
 void readAll() {
   pollIR(); float f = readCm(TRIG_F, ECHO_F); delay(PING_GAP_MS);
   pollIR(); float l = readCm(TRIG_L, ECHO_L); delay(PING_GAP_MS);
@@ -246,7 +230,6 @@ void readAll() {
 
   openL = countOpen(openL, rawL);
   openR = countOpen(openR, rawR);
-  trackStuck();
   checkSerialStop();
 }
 
@@ -285,7 +268,6 @@ void driveForward(int ms, bool brakeAtEnd) {
   while (millis() - t0 < (unsigned long)ms && !stopped) {
     readAll();
     if (stripeHit()) { park(); return; }
-    if (stuckNow()) break;
     if (dF < FRONT_CENTRE_CM) break;
     steer(dF < FRONT_SLOW_CM ? SLOW_PWM : BASE_PWM);
   }
@@ -322,7 +304,6 @@ void arcUntilWall(int dir) {
     if (el > arcMax) break;
     readAll();
     if (stripeHit()) { park(); return; }
-    if (stuckNow()) break;
     float fw = (dir > 0) ? dL : dR;
     if (el >= arcMin) {
 
@@ -345,7 +326,6 @@ void pivotUntilClear(int dir) {
     unsigned long el = millis() - t0;
     if (el > (unsigned long)PIVOT_MAX_MS) break;
     readAll();
-    if (stuckNow()) break;
     if (el >= (unsigned long)PIVOT_MIN_MS) {
       if (dF > FRONT_OPEN_CM) { if (++clear >= 3) { waitMs(PIVOT_EXTRA_MS); break; } }
       else clear = 0;
@@ -404,34 +384,18 @@ void shakeLoose() {
 }
 
 bool checkStuck() {
-  if (!stuckFlag) return false;
-  shakeLoose();
-  stuckFlag = false;
-  stillCount = 0;
-  refF = refL = refR = -100;
-  return true;
-}
-
-void leaveJunction() {
-  for (uint8_t i = 0; i < 3; i++) readAll();
-  float f0 = dF;
-  bool useDist = f0 < MAX_CM - 1;
-  unsigned long limit = useDist ? (unsigned long)EXIT_MAX_MS : (unsigned long)EXIT_FWD_MS;
-  unsigned long t0 = millis();
-  uint8_t reached = 0;
-  while (millis() - t0 < limit && !stopped) {
-    readAll();
-    if (stripeHit()) { park(); return; }
-    if (stuckNow()) break;
-    if (dF < FRONT_CENTRE_CM) break;
-    if (useDist) {
-      if (dF <= f0 - EXIT_DIST_CM) { if (++reached >= 2) break; }
-      else reached = 0;
-    }
-    steer(dF < FRONT_SLOW_CM ? SLOW_PWM : BASE_PWM);
+  float avg = sensorAverage();
+  if (avg < 0) { stillCount = 0; stuckRef = -100; return false; }
+  if (fabs(avg - stuckRef) > STILL_CM) {
+    stuckRef = avg; stillCount = 0; return false;
   }
-
-  openL = openR = 0;
+  if (++stillCount >= STUCK_COUNT) {
+    shakeLoose();
+    stillCount = 0;
+    stuckRef = -100;
+    return true;
+  }
+  return false;
 }
 
 void turnInto(int dir) {
@@ -448,7 +412,8 @@ void turnInto(int dir) {
   pivotUntilClear(dir);
 #endif
   if (finished || stopped) return;
-  leaveJunction();
+
+  driveForward(EXIT_FWD_MS, false);
 }
 
 void runMaze() {
